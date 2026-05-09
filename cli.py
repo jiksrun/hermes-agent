@@ -2799,6 +2799,28 @@ class HermesCLI:
         }
 
         if not agent:
+            # No agent yet — estimate context from pre-loaded conversation
+            # history so the status bar shows plausible usage before the
+            # first API call populates the real counts.
+            try:
+                from agent.model_metadata import (
+                    estimate_messages_tokens_rough,
+                    get_model_context_length,
+                )
+
+                hist = getattr(self, "conversation_history", None) or []
+                if hist:
+                    est = estimate_messages_tokens_rough(hist)
+                    if est:
+                        snapshot["context_tokens"] = est
+                        cl = get_model_context_length(self.model or "")
+                        if cl:
+                            snapshot["context_length"] = cl
+                            snapshot["context_percent"] = max(
+                                0, min(100, round(est / cl * 100))
+                            )
+            except Exception:
+                pass
             return snapshot
 
         snapshot["session_input_tokens"] = getattr(agent, "session_input_tokens", 0) or 0

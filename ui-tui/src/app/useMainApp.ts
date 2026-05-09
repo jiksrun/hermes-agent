@@ -3,6 +3,7 @@ import { useStore } from '@nanostores/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { STARTUP_RESUME_ID } from '../config/env.js'
+import { INITIAL_PICKER } from '../config/env.js'
 import { FULL_RENDER_TAIL_ITEMS, MAX_HISTORY, WHEEL_SCROLL_STEP } from '../config/limits.js'
 import { SECTION_NAMES, sectionMode } from '../domain/details.js'
 import { attachedImageNotice, imageTokenMeta } from '../domain/messages.js'
@@ -217,6 +218,13 @@ export function useMainApp(gw: GatewayClient) {
         }
       })
       .catch(() => {})
+  }, [])
+
+  // Open session picker on launch when `hermes sessions browse` triggered this
+  useEffect(() => {
+    if (INITIAL_PICKER) {
+      patchOverlayState({ picker: true })
+    }
   }, [])
 
   const messageId = useCallback((msg: Msg) => {

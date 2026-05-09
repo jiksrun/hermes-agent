@@ -398,34 +398,49 @@ def _has_any_provider_configured() -> bool:
     return False
 
 
-def _session_browse_picker(sessions: list) -> Optional[str]:
+def _session_browse_picker(
+    sessions: list,
+    use_repl: bool = False,
+) -> tuple:
     """Interactive curses-based session browser with live search filtering.
 
-    Returns the selected session ID, or None if cancelled.
+    Returns (session_id, use_repl) — session_id is None if cancelled.
+    Supports Delete key to remove sessions from within the picker.
+    Left/Right arrow toggles whether the selected session resumes in the
+    TUI or classic REPL.
     Uses curses (not simple_term_menu) to avoid the ghost-duplication rendering
     bug in tmux/iTerm when arrow keys are used.
     """
     if not sessions:
         print("No sessions found.")
-        return None
+        return (None, use_repl)
+
+    # Open DB for delete support
+    try:
+        from hermes_state import SessionDB
+
+        _browse_db = SessionDB()
+        _browse_sessions_dir = get_hermes_home() / "sessions"
+    except Exception:
+        _browse_db = None
+        _browse_sessions_dir = None
 
     # Try curses-based picker first
     try:
         import curses
 
-        result_holder = [None]
+        result_holder = [(None, use_repl)]
 
         def _format_row(s, max_x):
-            """Format a session row for display."""
+            """Format a session row for display — compact, no ID column."""
             title = (s.get("title") or "").strip()
             preview = (s.get("preview") or "").strip()
             source = s.get("source", "")[:6]
             last_active = _relative_time(s.get("last_active"))
-            sid = s["id"][:18]
 
-            # Adaptive column widths based on terminal width
-            # Layout: [arrow 3] [title/preview flexible] [active 12] [src 6] [id 18]
-            fixed_cols = 3 + 12 + 6 + 18 + 6  # arrow + active + src + id + padding
+            # Layout: [arrow 3] [name]  [active:10]  [source:5]  padding
+            # Name gets everything left over
+            fixed_cols = 3 + 10 + 5 + 6
             name_width = max(20, max_x - fixed_cols)
 
             if title:
@@ -433,9 +448,38 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
             elif preview:
                 name = preview[:name_width]
             else:
-                name = sid
+                name = s["id"][:name_width]
 
-            return f"{name:<{name_width}}  {last_active:<10}  {source:<5} {sid}"
+            return f"  {name:<{name_width}}  {last_active:<8}  {source:<5}"
+
+        def _detail_line(s, max_x):
+            """Build the detail/preview line for the selected session."""
+            sid = s["id"]
+            title = (s.get("title") or "").strip()
+            preview = (s.get("preview") or "").strip()
+            source = s.get("source", "")[:6]
+            model = (s.get("model") or "").strip()
+            last_active = _relative_time(s.get("last_active"))
+            parts = [f"ID: {sid}"]
+            if model:
+                parts.append(f"Model: {model}")
+            parts.append(f"Source: {source}")
+            parts.append(f"Active: {last_active}")
+            info = " | ".join(parts)
+            space = max_x - len(info) - 2
+            if space > 0:
+                if title and len(title) > space // 2:
+                    title = title[: space // 2 - 2] + "…"
+                if title:
+                    info = f"{title}  ·  {info}"
+                else:
+                    excerpt = (preview or sid)[:space]
+                    if len(excerpt) < len(preview or sid):
+                        excerpt = excerpt[: space - 1] + "…"
+                    info = f"{excerpt}  ·  {info}"
+            if len(info) > max_x - 2:
+                info = info[: max_x - 5] + "…"
+            return info
 
         def _match(s, query):
             """Check if a session matches the search query (case-insensitive)."""
@@ -452,21 +496,17 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
             if curses.has_colors():
                 curses.start_color()
                 curses.use_default_colors()
-                curses.init_pair(1, curses.COLOR_GREEN, -1)  # selected
-                curses.init_pair(2, curses.COLOR_YELLOW, -1)  # header
-                curses.init_pair(3, curses.COLOR_CYAN, -1)  # search
-                curses.init_pair(4, 8, -1)  # dim
 
             cursor = 0
             scroll_offset = 0
             search_text = ""
             filtered = list(sessions)
+            _repl_mode = [use_repl]  # mutable so _curses_browse can toggle it
 
             while True:
                 stdscr.clear()
                 max_y, max_x = stdscr.getmaxyx()
                 if max_y < 5 or max_x < 40:
-                    # Terminal too small
                     try:
                         stdscr.addstr(0, 0, "Terminal too small")
                     except curses.error:
@@ -475,44 +515,31 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
                     stdscr.getch()
                     return
 
-                # Header line
+                # ── Header ──────────────────────────────────────────
                 if search_text:
-                    header = f"  Browse sessions — filter: {search_text}█"
-                    header_attr = curses.A_BOLD
-                    if curses.has_colors():
-                        header_attr |= curses.color_pair(3)
+                    header = f"  🔍 {search_text}█"
+                    hattr = curses.A_BOLD
                 else:
-                    header = "  Browse sessions — ↑↓ navigate  Enter select  Type to filter  Esc quit"
-                    header_attr = curses.A_BOLD
-                    if curses.has_colors():
-                        header_attr |= curses.color_pair(2)
+                    header = f"  Sessions  ·  ↑↓/jk  Enter=resume  Del=delete  ←/→=mode  /filter  Esc=quit"
+                    hattr = curses.A_BOLD
                 try:
-                    stdscr.addnstr(0, 0, header, max_x - 1, header_attr)
+                    stdscr.addnstr(0, 0, header, max_x - 1, hattr)
                 except curses.error:
                     pass
 
-                # Column header line
-                fixed_cols = 3 + 12 + 6 + 18 + 6
-                name_width = max(20, max_x - fixed_cols)
-                col_header = f"   {'Title / Preview':<{name_width}}  {'Active':<10}  {'Src':<5} {'ID'}"
+                # ── Separator line ───────────────────────────────────
+                sep = "  " + "─" * (max_x - 4)
                 try:
-                    dim_attr = (
-                        curses.color_pair(4) if curses.has_colors() else curses.A_DIM
-                    )
-                    stdscr.addnstr(1, 0, col_header, max_x - 1, dim_attr)
+                    stdscr.addnstr(1, 0, sep, max_x - 1, curses.A_DIM)
                 except curses.error:
                     pass
 
-                # Compute visible area
-                visible_rows = max_y - 4  # header + col header + blank + footer
-                if visible_rows < 1:
-                    visible_rows = 1
+                # ── List rows ───────────────────────────────────────
+                visible_rows = max_y - 4  # header + sep + detail + footer
 
-                # Clamp cursor and scroll
                 if not filtered:
                     try:
-                        msg = "  No sessions match the filter."
-                        stdscr.addnstr(3, 0, msg, max_x - 1, curses.A_DIM)
+                        stdscr.addnstr(2, 0, "  No sessions match.", max_x - 1, curses.A_DIM)
                     except curses.error:
                         pass
                 else:
@@ -531,38 +558,51 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
                             min(len(filtered), scroll_offset + visible_rows),
                         )
                     ):
-                        y = draw_i + 3
-                        if y >= max_y - 1:
+                        y = draw_i + 2
+                        if y >= max_y - 2:
                             break
                         s = filtered[i]
-                        arrow = " → " if i == cursor else "   "
-                        row = arrow + _format_row(s, max_x - 3)
-                        attr = curses.A_NORMAL
-                        if i == cursor:
-                            attr = curses.A_BOLD
-                            if curses.has_colors():
-                                attr |= curses.color_pair(1)
-                        try:
-                            stdscr.addnstr(y, 0, row, max_x - 1, attr)
-                        except curses.error:
-                            pass
+                        is_sel = i == cursor
+                        row = _format_row(s, max_x)
 
-                # Footer
-                footer_y = max_y - 1
+                        if is_sel:
+                            # Use reverse video — works in every terminal
+                            try:
+                                stdscr.addnstr(y, 0, row, max_x - 1, curses.A_REVERSE)
+                            except curses.error:
+                                pass
+                        else:
+                            try:
+                                stdscr.addnstr(y, 0, row, max_x - 1, curses.A_NORMAL)
+                            except curses.error:
+                                pass
+
+                # ── Detail bar (selected session info) ──────────────
+                detail_y = max_y - 2
                 if filtered:
-                    footer = f"  {cursor + 1}/{len(filtered)} sessions"
-                    if len(filtered) < len(sessions):
-                        footer += f" (filtered from {len(sessions)})"
+                    sel = filtered[cursor]
+                    detail = _detail_line(sel, max_x)
                 else:
-                    footer = f"  0/{len(sessions)} sessions"
+                    detail = ""
                 try:
-                    stdscr.addnstr(
-                        footer_y,
-                        0,
-                        footer,
-                        max_x - 1,
-                        curses.color_pair(4) if curses.has_colors() else curses.A_DIM,
-                    )
+                    stdscr.addnstr(detail_y, 0, detail, max_x - 1, curses.A_DIM)
+                except curses.error:
+                    pass
+
+                # ── Footer line ─────────────────────────────────────
+                footer_y = max_y - 1
+                mode_tag = " [REPL]" if _repl_mode[0] else " [TUI]"
+                if filtered:
+                    total = len(sessions)
+                    showing = len(filtered)
+                    if showing < total:
+                        footer = f"  {cursor + 1}/{showing}  (filtered from {total}){mode_tag}"
+                    else:
+                        footer = f"  {cursor + 1}/{total}{mode_tag}"
+                else:
+                    footer = f"  0/{len(sessions)}{mode_tag}"
+                try:
+                    stdscr.addnstr(footer_y, 0, footer, max_x - 1, curses.A_DIM)
                 except curses.error:
                     pass
 
@@ -575,10 +615,32 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
                 elif key in (curses.KEY_DOWN,):
                     if filtered:
                         cursor = (cursor + 1) % len(filtered)
+                elif key in (curses.KEY_LEFT,):
+                    _repl_mode[0] = not _repl_mode[0]
+                elif key in (curses.KEY_RIGHT,):
+                    _repl_mode[0] = not _repl_mode[0]
                 elif key in (curses.KEY_ENTER, 10, 13):
                     if filtered:
-                        result_holder[0] = filtered[cursor]["id"]
+                        result_holder[0] = (filtered[cursor]["id"], _repl_mode[0])
                     return
+                elif key in (curses.KEY_DC,):  # Delete key
+                    if filtered and _browse_db is not None:
+                        sid = filtered[cursor]["id"]
+                        confirm_msg = f"  Delete session '{sid[:24]}'? (y/N) "
+                        try:
+                            stdscr.addnstr(max_y - 1, 0, confirm_msg, max_x - 1, curses.A_BOLD)
+                        except curses.error:
+                            pass
+                        stdscr.refresh()
+                        confirm_key = stdscr.getch()
+                        if confirm_key in (ord('y'), ord('Y')):
+                            _browse_db.delete_session(sid, sessions_dir=_browse_sessions_dir)
+                            sessions[:] = [s for s in sessions if s["id"] != sid]
+                            filtered[:] = [s for s in filtered if s["id"] != sid]
+                            if cursor >= len(filtered):
+                                cursor = max(0, len(filtered) - 1)
+                            if scroll_offset >= len(filtered):
+                                scroll_offset = max(0, len(filtered) - 1)
                 elif key == 27:  # Esc
                     if search_text:
                         # First Esc clears the search
@@ -600,6 +662,14 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
                         scroll_offset = 0
                 elif key == ord("q") and not search_text:
                     return
+                elif key == ord("j") and not search_text:  # vi down
+                    if filtered:
+                        cursor = (cursor + 1) % len(filtered)
+                elif key == ord("k") and not search_text:  # vi up
+                    if filtered:
+                        cursor = (cursor - 1) % len(filtered)
+                elif key == ord("/") and not search_text:  # start filter
+                    search_text = ""
                 elif 32 <= key <= 126:
                     # Printable character → add to search filter
                     search_text += chr(key)
@@ -608,13 +678,15 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
                     scroll_offset = 0
 
         curses.wrapper(_curses_browse)
+        if _browse_db is not None:
+            _browse_db.close()
         return result_holder[0]
 
     except Exception:
         pass
 
     # Fallback: numbered list (Windows without curses, etc.)
-    print("\n  Browse sessions  (enter number to resume, q to cancel)\n")
+    print("\n  Browse sessions  (enter number to resume, d<num> to delete, ←/→ mode, q to cancel)\n")
     for i, s in enumerate(sessions):
         title = (s.get("title") or "").strip()
         preview = (s.get("preview") or "").strip()
@@ -625,20 +697,37 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
         src = s.get("source", "")[:6]
         print(f"  {i + 1:>3}. {label:<50}  {last_active:<10}  {src}")
 
+    _repl_fallback = use_repl
     while True:
         try:
-            val = input(f"\n  Select [1-{len(sessions)}]: ").strip()
+            mode_label = "REPL" if _repl_fallback else "TUI"
+            val = input(f"\n  Select [1-{len(sessions)}] or d<num> to delete  [mode: {mode_label} ←/→]: ").strip()
             if not val or val.lower() in ("q", "quit", "exit"):
-                return None
+                return (None, _repl_fallback)
+            if val.lower() in ("m", "mode", "<", ">"):
+                _repl_fallback = not _repl_fallback
+                continue
+            if val.lower().startswith("d") and len(val) > 1:
+                idx = int(val[1:]) - 1
+                if 0 <= idx < len(sessions) and _browse_db is not None:
+                    sid = sessions[idx]["id"]
+                    confirm = input(f"  Delete '{sid}'? (y/N): ").strip().lower()
+                    if confirm in ("y", "yes"):
+                        _browse_db.delete_session(sid, sessions_dir=_browse_sessions_dir)
+                        del sessions[idx]
+                        print(f"  Deleted. {len(sessions)} session(s) remaining.")
+                    continue
+                print(f"  Invalid. Enter 1-{len(sessions)} or d<num> to delete.")
+                continue
             idx = int(val) - 1
             if 0 <= idx < len(sessions):
-                return sessions[idx]["id"]
-            print(f"  Invalid selection. Enter 1-{len(sessions)} or q to cancel.")
-        except ValueError:
-            print("  Invalid input. Enter a number or q to cancel.")
+                return (sessions[idx]["id"], _repl_fallback)
+            print(f"  Invalid selection. Enter 1-{len(sessions)} or d<num> to delete.")
+        except (ValueError, IndexError):
+            print(f"  Invalid input. Enter a number or d<num> to delete.")
         except (KeyboardInterrupt, EOFError):
             print()
-            return None
+            return (None, _repl_fallback)
 
 
 def _resolve_last_session(source: str = "cli") -> Optional[str]:
@@ -10701,6 +10790,19 @@ Examples:
     sessions_browse.add_argument(
         "--limit", type=int, default=500, help="Max sessions to load (default: 500)"
     )
+    sessions_browse.add_argument(
+        "--tui",
+        action="store_true",
+        default=False,
+        dest="browse_tui",
+        help="Open the full TUI session picker instead of the curses picker",
+    )
+    sessions_browse.add_argument(
+        "--no-tui",
+        action="store_true",
+        dest="browse_no_tui",
+        help="Resume selected session in the classic REPL instead of the TUI",
+    )
 
     def _confirm_prompt(prompt: str) -> bool:
         """Prompt for y/N confirmation, safe against non-TTY environments."""
@@ -10835,6 +10937,19 @@ Examples:
             limit = getattr(args, "limit", 500) or 500
             source = getattr(args, "source", None)
             _browse_exclude = None if source else ["tool"]
+
+            # --tui flag: open the full TUI with session picker overlay
+            use_tui = getattr(args, "browse_tui", False)
+            if use_tui:
+                db.close()
+                os.environ["HERMES_TUI_INITIAL_PICKER"] = "1"
+                try:
+                    _launch_tui(query=None)
+                finally:
+                    os.environ.pop("HERMES_TUI_INITIAL_PICKER", None)
+                return
+
+            # Default: curses picker (improved), resume in TUI
             sessions = db.list_sessions_rich(
                 source=source, exclude_sources=_browse_exclude, limit=limit
             )
@@ -10843,17 +10958,21 @@ Examples:
                 print("No sessions found.")
                 return
 
-            selected_id = _session_browse_picker(sessions)
+            selected_id, picker_use_repl = _session_browse_picker(sessions)
             if not selected_id:
                 print("Cancelled.")
                 return
 
-            # Launch hermes --resume <id> by replacing the current process
-            print(f"Resuming session: {selected_id}")
-            from hermes_cli.relaunch import relaunch
+            # Resume in TUI (default) or classic REPL (←/→ in picker, or --no-tui)
+            if picker_use_repl or getattr(args, "browse_no_tui", False):
+                from hermes_cli.relaunch import relaunch
 
-            relaunch(["--resume", selected_id])
-            return  # won't reach here after execvp
+                print(f"Resuming session: {selected_id}")
+                relaunch(["--resume", selected_id])
+                return
+            print(f"Resuming session: {selected_id}")
+            _launch_tui(resume_session_id=selected_id)
+            return
 
         elif action == "stats":
             total = db.session_count()

@@ -45,12 +45,12 @@ class TestSessionBrowsePicker:
 
     def test_empty_sessions_returns_none(self, capsys):
         result = _session_browse_picker([])
-        assert result is None
+        assert result[0] is None
         assert "No sessions found" in capsys.readouterr().out
 
     def test_returns_none_when_no_sessions(self, capsys):
         result = _session_browse_picker([])
-        assert result is None
+        assert result[0] is None
 
     def test_fallback_mode_valid_selection(self):
         """When curses is unavailable, fallback numbered list should work."""
@@ -69,7 +69,7 @@ class TestSessionBrowsePicker:
             with patch("builtins.input", return_value="2"):
                 result = _session_browse_picker(sessions)
 
-        assert result == sessions[1]["id"]
+        assert result[0] == sessions[1]["id"]
 
     def test_fallback_mode_cancel_q(self):
         """Entering 'q' in fallback mode cancels."""
@@ -87,7 +87,7 @@ class TestSessionBrowsePicker:
             with patch("builtins.input", return_value="q"):
                 result = _session_browse_picker(sessions)
 
-        assert result is None
+        assert result[0] is None
 
     def test_fallback_mode_cancel_empty(self):
         """Entering empty string in fallback mode cancels."""
@@ -105,7 +105,7 @@ class TestSessionBrowsePicker:
             with patch("builtins.input", return_value=""):
                 result = _session_browse_picker(sessions)
 
-        assert result is None
+        assert result[0] is None
 
     def test_fallback_mode_invalid_then_valid(self):
         """Invalid selection followed by valid one works."""
@@ -123,7 +123,7 @@ class TestSessionBrowsePicker:
             with patch("builtins.input", side_effect=["99", "1"]):
                 result = _session_browse_picker(sessions)
 
-        assert result == sessions[0]["id"]
+        assert result[0] == sessions[0]["id"]
 
     def test_fallback_mode_keyboard_interrupt(self):
         """KeyboardInterrupt in fallback mode returns None."""
@@ -141,7 +141,7 @@ class TestSessionBrowsePicker:
             with patch("builtins.input", side_effect=KeyboardInterrupt):
                 result = _session_browse_picker(sessions)
 
-        assert result is None
+        assert result[0] is None
 
     def test_fallback_displays_all_sessions(self, capsys):
         """Fallback mode should display all session entries."""
@@ -273,35 +273,35 @@ class TestCursesBrowse:
     def test_enter_selects_first_session(self):
         sessions = _make_sessions(3)
         result = self._run_with_keys(sessions, [10])  # Enter key
-        assert result == sessions[0]["id"]
+        assert result[0] == sessions[0]["id"]
 
     def test_down_then_enter_selects_second(self):
         import curses
         sessions = _make_sessions(3)
         result = self._run_with_keys(sessions, [curses.KEY_DOWN, 10])
-        assert result == sessions[1]["id"]
+        assert result[0] == sessions[1]["id"]
 
     def test_down_down_enter_selects_third(self):
         import curses
         sessions = _make_sessions(5)
         result = self._run_with_keys(sessions, [curses.KEY_DOWN, curses.KEY_DOWN, 10])
-        assert result == sessions[2]["id"]
+        assert result[0] == sessions[2]["id"]
 
     def test_up_wraps_to_last(self):
         import curses
         sessions = _make_sessions(3)
         result = self._run_with_keys(sessions, [curses.KEY_UP, 10])
-        assert result == sessions[2]["id"]
+        assert result[0] == sessions[2]["id"]
 
     def test_escape_cancels(self):
         sessions = _make_sessions(3)
         result = self._run_with_keys(sessions, [27])  # Esc
-        assert result is None
+        assert result[0] is None
 
     def test_q_cancels(self):
         sessions = _make_sessions(3)
         result = self._run_with_keys(sessions, [ord('q')])
-        assert result is None
+        assert result[0] is None
 
     def test_type_to_filter_then_enter(self):
         """Typing characters filters the list, Enter selects from filtered."""
@@ -314,14 +314,14 @@ class TestCursesBrowse:
         # Type "Beta" then Enter — should select s2
         keys = [ord(c) for c in "Beta"] + [10]
         result = self._run_with_keys(sessions, keys)
-        assert result == "s2"
+        assert result[0] == "s2"
 
     def test_filter_no_match_enter_does_nothing(self):
         """When filter produces no results, Enter shouldn't select."""
         sessions = _make_sessions(3)
         keys = [ord(c) for c in "zzzznonexistent"] + [10]
         result = self._run_with_keys(sessions, keys)
-        assert result is None
+        assert result[0] is None
 
     def test_backspace_removes_filter_char(self):
         """Backspace removes the last character from the filter."""
@@ -333,7 +333,7 @@ class TestCursesBrowse:
         # Type "Bet", backspace, backspace, backspace (clears filter), then Enter (selects first)
         keys = [ord('B'), ord('e'), ord('t'), 127, 127, 127, 10]
         result = self._run_with_keys(sessions, keys)
-        assert result == "s1"
+        assert result[0] == "s1"
 
     def test_escape_clears_filter_first(self):
         """First Esc clears the search text, second Esc exits."""
@@ -342,7 +342,7 @@ class TestCursesBrowse:
         # Type "ab" then Esc (clears filter) then Enter (selects first)
         keys = [ord('a'), ord('b'), 27, 10]
         result = self._run_with_keys(sessions, keys)
-        assert result == sessions[0]["id"]
+        assert result[0] == sessions[0]["id"]
 
     def test_filter_matches_preview(self):
         """Typing should match against session preview text."""
@@ -352,7 +352,7 @@ class TestCursesBrowse:
         ]
         keys = [ord(c) for c in "Mine"] + [10]
         result = self._run_with_keys(sessions, keys)
-        assert result == "s1"
+        assert result[0] == "s1"
 
     def test_filter_matches_source(self):
         """Typing a source name should filter by source."""
@@ -362,13 +362,13 @@ class TestCursesBrowse:
         ]
         keys = [ord(c) for c in "telegram"] + [10]
         result = self._run_with_keys(sessions, keys)
-        assert result == "s1"
+        assert result[0] == "s1"
 
     def test_q_quits_when_no_filter_active(self):
         """When no search text is active, 'q' should quit (not filter)."""
         sessions = _make_sessions(3)
         result = self._run_with_keys(sessions, [ord('q')])
-        assert result is None
+        assert result[0] is None
 
     def test_q_types_into_filter_when_filter_active(self):
         """When search text is already active, 'q' should add to filter, not quit."""
@@ -381,7 +381,7 @@ class TestCursesBrowse:
         # "seq" still matches "the sequel" → Enter selects it
         keys = [ord('s'), ord('e'), ord('q'), 10]
         result = self._run_with_keys(sessions, keys)
-        assert result == "s1"  # "the sequel" matches "seq"
+        assert result[0] == "s1"  # "the sequel" matches "seq"
 
 
 # ─── Argument parser registration ──────────────────────────────────────────
@@ -426,7 +426,7 @@ class TestCmdSessionsBrowse:
     def test_browse_no_sessions_prints_message(self, capsys):
         """When no sessions exist, _session_browse_picker returns None and prints message."""
         result = _session_browse_picker([])
-        assert result is None
+        assert result[0] is None
         output = capsys.readouterr().out
         assert "No sessions found" in output
 
@@ -448,7 +448,7 @@ class TestCmdSessionsBrowse:
             with patch("builtins.input", return_value="1"):
                 result = _session_browse_picker(sessions)
 
-        assert result == "s1"
+        assert result[0] == "s1"
 
 
 # ─── Edge cases ──────────────────────────────────────────────────────────────
@@ -474,7 +474,7 @@ class TestEdgeCases:
             with patch("builtins.input", return_value="1"):
                 result = _session_browse_picker(sessions)
 
-        assert result == "minimal_001"
+        assert result[0] == "minimal_001"
 
     def test_single_session(self):
         """A single session in the list should work fine."""
@@ -494,7 +494,7 @@ class TestEdgeCases:
             with patch("builtins.input", return_value="1"):
                 result = _session_browse_picker(sessions)
 
-        assert result == "only_one"
+        assert result[0] == "only_one"
 
     def test_long_title_truncated_in_fallback(self, capsys):
         """Very long titles should be truncated in fallback mode."""

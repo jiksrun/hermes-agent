@@ -15,3 +15,7 @@ export const INLINE_MODE = truthy(process.env.HERMES_TUI_INLINE)
 // Live FPS counter overlay, fed by ink's onFrame (real render rate, not a
 // synthetic timer).
 export const SHOW_FPS = truthy(process.env.HERMES_TUI_FPS)
+
+// When set, the TUI opens directly into the session picker overlay
+// (used by `hermes sessions browse`).
+export const INITIAL_PICKER = truthy(process.env.HERMES_TUI_INITIAL_PICKER)

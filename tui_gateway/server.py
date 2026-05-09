@@ -581,6 +581,26 @@ def _start_agent_build(sid: str, session: dict) -> None:
             _wire_callbacks(sid)
             _notify_session_boundary("on_session_reset", key)
 
+            # If the session has pre-loaded history (resumed session),
+            # estimate token count for accurate initial context display.
+            # A freshly-created agent starts with last_prompt_tokens=0.
+            try:
+                from agent.model_metadata import estimate_messages_tokens_rough
+
+                cc = getattr(agent, "context_compressor", None)
+                if (
+                    cc is not None
+                    and hasattr(cc, "last_prompt_tokens")
+                    and cc.last_prompt_tokens == 0
+                ):
+                    h = current.get("history") or []
+                    if h:
+                        estimated = estimate_messages_tokens_rough(h)
+                        if estimated:
+                            cc.last_prompt_tokens = estimated
+            except Exception:
+                pass
+
             info = _session_info(agent)
             warn = _probe_credentials(agent)
             if warn:
@@ -2116,10 +2136,8 @@ def _(rid, params: dict) -> dict:
         "transport": current_transport() or _stdio_transport,
     }
 
-    # Return the lightweight session immediately so Ink can paint the composer
-    # + skeleton panel, then build the real AIAgent just after this response is
-    # flushed.  This keeps startup responsive while still hydrating tools/skills
-    # without requiring the user to submit a first prompt.
+    # Start building the AIAgent just after this response is flushed so
+    # tools/skills are ready by the time the user types their first prompt.
     def _deferred_build() -> None:
         session = _sessions.get(sid)
         if session is not None:
@@ -2251,6 +2269,7 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4007, "session not found")
     sid = uuid.uuid4().hex[:8]
     _enable_gateway_prompts()
+
     try:
         db.reopen_session(target)
         history = db.get_messages_as_conversation(target)
@@ -2258,14 +2277,87 @@ def _(rid, params: dict) -> dict:
             target, include_ancestors=True
         )
         messages = _history_to_messages(display_history)
-        tokens = _set_session_context(target)
-        try:
-            agent = _make_agent(sid, target, session_id=target)
-        finally:
-            _clear_session_context(tokens)
-        _init_session(sid, target, agent, history, cols=int(params.get("cols", 80)))
     except Exception as e:
         return _err(rid, 5000, f"resume failed: {e}")
+
+    cols = int(params.get("cols", 80))
+    model_name = _resolve_model()
+
+    # Estimate token context from loaded history for the initial
+    # status-bar display, so the TUI shows a plausible context
+    # indicator before the deferred agent build completes.
+    estimated_tokens = 0
+    context_length = 0
+    try:
+        from agent.model_metadata import (
+            estimate_messages_tokens_rough,
+            get_model_context_length,
+        )
+
+        estimated_tokens = estimate_messages_tokens_rough(display_history)
+        context_length = get_model_context_length(model_name)
+    except Exception:
+        pass
+
+    # Lightweight session slot (agent built deferred in background,
+    # mirroring session.create).  The pre-loaded history lets the
+    # agent pick up where the conversation left off when the first
+    # message arr ives.
+    ready = threading.Event()
+    _sessions[sid] = {
+        "agent": None,
+        "agent_error": None,
+        "agent_ready": ready,
+        "session_key": target,
+        "history": history,
+        "history_lock": threading.Lock(),
+        "history_version": 0,
+        "running": False,
+        "attached_images": [],
+        "image_counter": 0,
+        "cols": cols,
+        "slash_worker": None,
+        "show_reasoning": _load_show_reasoning(),
+        "tool_progress_mode": _load_tool_progress_mode(),
+        "edit_snapshots": {},
+        "tool_started_at": {},
+        "transport": current_transport() or _stdio_transport,
+        "pending_title": None,
+    }
+
+    # Start building the AIAgent just after this response is flushed so
+    # tools/skills are ready by the time the user types their first prompt.
+    def _deferred_build() -> None:
+        s = _sessions.get(sid)
+        if s is not None:
+            _start_agent_build(sid, s)
+
+    build_timer = threading.Timer(0.05, _deferred_build)
+    build_timer.daemon = True
+    build_timer.start()
+
+    # Lightweight info with estimated context
+    pct = (
+        max(0, min(100, round(estimated_tokens / context_length * 100)))
+        if context_length and estimated_tokens
+        else 0
+    )
+    info = {
+        "model": model_name,
+        "tools": {},
+        "skills": {},
+        "cwd": os.getcwd(),
+        "usage": {
+            "context_used": estimated_tokens,
+            "context_max": context_length or 0,
+            "context_percent": pct,
+            "input": 0,
+            "output": 0,
+            "total": estimated_tokens,
+            "calls": 0,
+        },
+    }
+
     return _ok(
         rid,
         {
@@ -2273,7 +2365,7 @@ def _(rid, params: dict) -> dict:
             "resumed": target,
             "message_count": len(messages),
             "messages": messages,
-            "info": _session_info(agent),
+            "info": info,
         },
     )
 
